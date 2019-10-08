@@ -56,8 +56,18 @@ nfacct.plugin
 xenstat.plugin
 !xenstat.plugin/
 
+perf.plugin
+!perf.plugin/
+
+slabinfo.plugin
+!slabinfo.plugin/
+
 cgroup-network
 !cgroup-network/
+
+# protoc generated files
+*.pb.cc
+*.pb.h
 
 # installation artifacts
 packaging/installer/.environment.sh
@@ -70,8 +80,7 @@ packaging/makeself/tmp/
 # coverity
 cov-int/
 netdata-coverity-analysis.tgz
-.coverity-token
-.coverity-build
+.coverity-scan.conf
 
 .cproject/
 .idea/
@@ -80,7 +89,6 @@ netdata-coverity-analysis.tgz
 .settings/
 README
 TODO.md
-netdata.conf
 TODO.txt
 
 web/gui/chart-info/
@@ -132,8 +140,6 @@ cmake_install.cmake
 .DS_Store
 webcopylocal*
 
-contrib/debian/changelog
-
 # converted diagrams
 diagrams/*.png
 diagrams/*.svg
@@ -161,6 +167,10 @@ callgrind.out.*
 gmon.out
 gmon.txt
 sitespeed-result/
+tests/acls/acl.sh
+tests/urls/request.sh
+tests/alarm_repetition/alarm.sh
+tests/template_dimension/template_dim.sh
 
 # tests and temp files
 python.d/python-modules-installer.sh
@@ -171,3 +181,6 @@ docs/generator/build
 docs/generator/mkdocs.yml
 
 .environment.sh
+
+#CLion files
+netdata.cbp

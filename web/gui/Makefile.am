@@ -29,6 +29,7 @@ DASHBOARD_JS_FILES = \
     src/dashboard.js/charting/d3pie.js \
     src/dashboard.js/charting/d3.js \
     src/dashboard.js/charting/peity.js \
+    src/dashboard.js/charting/textonly.js \
     src/dashboard.js/charting.js \
     src/dashboard.js/chart-registry.js \
     src/dashboard.js/common.js \
@@ -60,18 +61,14 @@ dist_web_DATA = \
 	index.html \
 	main.css \
 	main.js \
+	console.html \
 	infographic.html \
 	robots.txt \
 	refresh-badges.js \
 	sitemap.xml \
 	tv.html \
+	dash-example.html \
 	version.txt \
-	$(NULL)
-
-
-webconsoledir=$(webdir)/console
-dist_webconsole_DATA = \
-	console/index.html \
 	$(NULL)
 
 webstaticdir=$(webdir)/static/img

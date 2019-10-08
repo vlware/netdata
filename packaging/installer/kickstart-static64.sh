@@ -1,7 +1,15 @@
 #!/usr/bin/env sh
+#
 # SPDX-License-Identifier: GPL-3.0-or-later
 # shellcheck disable=SC1117,SC2039,SC2059,SC2086
-
+#
+#  Options to run
+#  --dont-wait              do not wait for input
+#  --non-interactive        do not wait for input
+#  --dont-start-it          do not start netdata after install
+#  --stable-channel         Use the stable release channel, rather than the nightly to fetch sources
+#  --local-files Use a manually provided tarball for the installation
+#
 # ---------------------------------------------------------------------------------------------------------------------
 # library functions copied from packaging/installer/functions.sh
 
@@ -32,13 +40,27 @@ setup_terminal() {
 
 	return 0
 }
+setup_terminal || echo >/dev/null
 
-progress() {
-	echo >&2 " --- ${TPUT_DIM}${TPUT_BOLD}${*}${TPUT_RESET} --- "
+# -----------------------------------------------------------------------------
+fatal() {
+	printf >&2 "${TPUT_BGRED}${TPUT_WHITE}${TPUT_BOLD} ABORTED ${TPUT_RESET} ${*} \n\n"
+	exit 1
 }
 
+run_ok() {
+	printf >&2 "${TPUT_BGGREEN}${TPUT_WHITE}${TPUT_BOLD} OK ${TPUT_RESET} ${*} \n\n"
+}
+
+run_failed() {
+	printf >&2 "${TPUT_BGRED}${TPUT_WHITE}${TPUT_BOLD} FAILED ${TPUT_RESET} ${*} \n\n"
+}
+
+ESCAPED_PRINT_METHOD=
+printf "%q " test >/dev/null 2>&1
+[ $? -eq 0 ] && ESCAPED_PRINT_METHOD="printfq"
 escaped_print() {
-	if printf "%q " test >/dev/null 2>&1; then
+	if [ "${ESCAPED_PRINT_METHOD}" = "printfq" ]; then
 		printf "%q " "${@}"
 	else
 		printf "%s" "${*}"
@@ -46,24 +68,39 @@ escaped_print() {
 	return 0
 }
 
+progress() {
+	echo >&2 " --- ${TPUT_DIM}${TPUT_BOLD}${*}${TPUT_RESET} --- "
+}
+
+run_logfile="/dev/null"
 run() {
-	local dir="${PWD}" info_console
+	local user="${USER--}" dir="${PWD}" info info_console
 
 	if [ "${UID}" = "0" ]; then
+		info="[root ${dir}]# "
 		info_console="[${TPUT_DIM}${dir}${TPUT_RESET}]# "
 	else
+		info="[${user} ${dir}]$ "
 		info_console="[${TPUT_DIM}${dir}${TPUT_RESET}]$ "
 	fi
 
-	escaped_print "${info_console}${TPUT_BOLD}${TPUT_YELLOW}" "${@}" "${TPUT_RESET}\n" >&2
+	printf >>"${run_logfile}" "${info}"
+	escaped_print >>"${run_logfile}" "${@}"
+	printf >>"${run_logfile}" " ... "
+
+	printf >&2 "${info_console}${TPUT_BOLD}${TPUT_YELLOW}"
+	escaped_print >&2 "${@}"
+	printf >&2 "${TPUT_RESET}\n"
 
 	"${@}"
 
 	local ret=$?
 	if [ ${ret} -ne 0 ]; then
-		printf >&2 "${TPUT_BGRED}${TPUT_WHITE}${TPUT_BOLD} FAILED ${TPUT_RESET} ${*} \n\n"
+		run_failed
+		printf >>"${run_logfile}" "FAILED with exit code ${ret}\n"
 	else
-		printf >&2 "${TPUT_BGGREEN}${TPUT_WHITE}${TPUT_BOLD} OK ${TPUT_RESET} ${*} \n\n"
+		run_ok
+		printf >>"${run_logfile}" "OK\n"
 	fi
 
 	return ${ret}
@@ -98,7 +135,12 @@ download() {
 }
 
 set_tarball_urls() {
-	if [ "$1" == "stable" ]; then
+	if [ -n "${NETDATA_LOCAL_TARBALL_OVERRIDE}" ]; then
+		progress "Not fetching remote tarballs, local override was given"
+		return
+	fi
+
+	if [ "$1" = "stable" ]; then
 		local latest
 		# Simple version
 		# latest="$(curl -sSL https://api.github.com/repos/netdata/netdata/releases/latest | grep tag_name | cut -d'"' -f4)"
@@ -130,8 +172,6 @@ sudo=""
 [ -z "${UID}" ] && UID="$(id -u)"
 [ "${UID}" -ne "0" ] && sudo="sudo"
 
-setup_terminal || echo >/dev/null
-
 # ---------------------------------------------------------------------------------------------------------------------
 if [ "$(uname -m)" != "x86_64" ]; then
 	fatal "Static binary versions of netdata are available only for 64bit Intel/AMD CPUs (x86_64), but yours is: $(uname -m)."
@@ -148,39 +188,64 @@ RELEASE_CHANNEL="nightly"
 while [ -n "${1}" ]; do
 	if [ "${1}" = "--dont-wait" ] || [ "${1}" = "--non-interactive" ] || [ "${1}" = "--accept" ]; then
 		opts="${opts} --accept"
+		shift 1
 	elif [ "${1}" = "--dont-start-it" ]; then
 		inner_opts="${inner_opts} ${1}"
+		shift 1
 	elif [ "${1}" = "--stable-channel" ]; then
 		RELEASE_CHANNEL="stable"
+		shift 1
+	elif [ "${1}" = "--local-files" ]; then
+		shift 1
+		if [ -z "${1}" ]; then
+			fatal "Option --local-files requires extra information. The desired tarball full filename is needed"
+		fi
+
+		NETDATA_LOCAL_TARBALL_OVERRIDE="${1}"
+		shift 1
+		if [ -z "${1}" ]; then
+			fatal "Option --local-files requires a pair of the tarball source and the checksum file"
+		fi
+
+		NETDATA_LOCAL_TARBALL_OVERRIDE_CHECKSUM="${1}"
+		shift 1
 	else
-		echo >&2 "Unknown option '${1}'"
+		echo >&2 "Unknown option '${1}' or invalid number of arguments. Please check the README for the available arguments of ${0} and try again"
 		exit 1
 	fi
-	shift
 done
 [ -n "${inner_opts}" ] && inner_opts="-- ${inner_opts}"
 
 # ---------------------------------------------------------------------------------------------------------------------
 TMPDIR=$(create_tmp_directory)
-cd "${TMPDIR}" || :
+cd "${TMPDIR}"
 
-set_tarball_urls "${RELEASE_CHANNEL}"
-progress "Downloading static netdata binary: ${NETDATA_TARBALL_URL}"
+if [ -z "${NETDATA_LOCAL_TARBALL_OVERRIDE}" ]; then
+	set_tarball_urls "${RELEASE_CHANNEL}"
+	progress "Downloading static netdata binary: ${NETDATA_TARBALL_URL}"
 
-download "${NETDATA_TARBALL_CHECKSUM_URL}" "${TMPDIR}/sha256sum.txt"
-download "${NETDATA_TARBALL_URL}" "${TMPDIR}/netdata-latest.gz.run"
+	download "${NETDATA_TARBALL_CHECKSUM_URL}" "${TMPDIR}/sha256sum.txt"
+	download "${NETDATA_TARBALL_URL}" "${TMPDIR}/netdata-latest.gz.run"
+else
+	progress "Installation sources were given as input, running installation using \"${NETDATA_LOCAL_TARBALL_OVERRIDE}\""
+	run cp "${NETDATA_LOCAL_TARBALL_OVERRIDE}" "${TMPDIR}/netdata-latest.gz.run"
+	run cp "${NETDATA_LOCAL_TARBALL_OVERRIDE_CHECKSUM}" "${TMPDIR}/sha256sum.txt"
+fi
+
 if ! grep netdata-latest.gz.run "${TMPDIR}/sha256sum.txt" | safe_sha256sum -c - >/dev/null 2>&1; then
 	fatal "Static binary checksum validation failed. Stopping netdata installation and leaving binary in ${TMPDIR}"
 fi
 
 # ---------------------------------------------------------------------------------------------------------------------
 progress "Installing netdata"
-
 run ${sudo} sh "${TMPDIR}/netdata-latest.gz.run" ${opts} ${inner_opts}
 
 #shellcheck disable=SC2181
 if [ $? -eq 0 ]; then
-	rm "${TMPDIR}/netdata-latest.gz.run"
+	run ${sudo} rm "${TMPDIR}/netdata-latest.gz.run"
+	if [ ! "${TMPDIR}" = "/" ] && [ -d "${TMPDIR}" ]; then
+		run ${sudo} rm -rf "${TMPDIR}"
+	fi
 else
 	echo >&2 "NOTE: did not remove: ${TMPDIR}/netdata-latest.gz.run"
 fi

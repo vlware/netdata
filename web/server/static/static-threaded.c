@@ -7,23 +7,26 @@ int web_client_timeout = DEFAULT_DISCONNECT_IDLE_WEB_CLIENTS_AFTER_SECONDS;
 int web_client_first_request_timeout = DEFAULT_TIMEOUT_TO_RECEIVE_FIRST_WEB_REQUEST;
 long web_client_streaming_rate_t = 0L;
 
-// ----------------------------------------------------------------------------
-// high level web clients connection management
-
-static struct web_client *web_client_create_on_fd(int fd, const char *client_ip, const char *client_port, int port_acl) {
+/*
+ * --------------------------------------------------------------------------------------------------------------------
+ * Build web_client state from the pollinfo that describes an accepted connection.
+ */
+static struct web_client *web_client_create_on_fd(POLLINFO *pi) {
     struct web_client *w;
 
     w = web_client_get_from_cache_or_allocate();
-    w->ifd = w->ofd = fd;
+    w->ifd = w->ofd = pi->fd;
 
-    strncpyz(w->client_ip, client_ip, sizeof(w->client_ip) - 1);
-    strncpyz(w->client_port, client_port, sizeof(w->client_port) - 1);
+    strncpyz(w->client_ip,   pi->client_ip,   sizeof(w->client_ip) - 1);
+    strncpyz(w->client_port, pi->client_port, sizeof(w->client_port) - 1);
+    strncpyz(w->client_host, pi->client_host, sizeof(w->client_host) - 1);
 
     if(unlikely(!*w->client_ip))   strcpy(w->client_ip,   "-");
     if(unlikely(!*w->client_port)) strcpy(w->client_port, "-");
-	w->port_acl = port_acl;
+	w->port_acl = pi->port_acl;
 
     web_client_initialize_connection(w);
+    w->pollinfo_slot = pi->slot;
     return(w);
 }
 
@@ -76,7 +79,7 @@ static void *web_server_file_add_callback(POLLINFO *pi, short int *events, void 
     return w;
 }
 
-static void web_werver_file_del_callback(POLLINFO *pi) {
+static void web_server_file_del_callback(POLLINFO *pi) {
     struct web_client *w = (struct web_client *)pi->data;
     debug(D_WEB_CLIENT, "%llu: RELEASE FILE READ ON FD %d", w->id, pi->fd);
 
@@ -138,7 +141,7 @@ static int web_server_file_write_callback(POLLINFO *pi, short int *events) {
 // web server clients
 
 static void *web_server_add_callback(POLLINFO *pi, short int *events, void *data) {
-    (void)data;
+    (void)data;         // Supress warning on unused argument
 
     worker_private->connected++;
 
@@ -149,13 +152,69 @@ static void *web_server_add_callback(POLLINFO *pi, short int *events, void *data
     *events = POLLIN;
 
     debug(D_WEB_CLIENT_ACCESS, "LISTENER on %d: new connection.", pi->fd);
-    struct web_client *w = web_client_create_on_fd(pi->fd, pi->client_ip, pi->client_port, pi->port_acl);
-    w->pollinfo_slot = pi->slot;
+    struct web_client *w = web_client_create_on_fd(pi);
 
-    if(unlikely(pi->socktype == AF_UNIX))
+    if (!strncmp(pi->client_port, "UNIX", 4)) {
         web_client_set_unix(w);
-    else
+    } else {
         web_client_set_tcp(w);
+    }
+
+#ifdef ENABLE_HTTPS
+    if ((!web_client_check_unix(w)) && ( netdata_srv_ctx )) {
+        if( sock_delnonblock(w->ifd) < 0 ){
+            error("Web server cannot remove the non-blocking flag from socket %d",w->ifd);
+        }
+
+        //Read the first 7 bytes from the message, but the message
+        //is not removed from the queue, because we are using MSG_PEEK
+        char test[8];
+        if ( recv(w->ifd,test, 7,MSG_PEEK) == 7 ) {
+            test[7] = 0x00;
+        }
+        else {
+            //Case I do not have success to read 7 bytes,
+            //this means that the mensage was not completely read, so
+            //I cannot identify it yet.
+            sock_setnonblock(w->ifd);
+            return w;
+        }
+
+        //The next two ifs are not together because I am reusing SSL structure
+        if (!w->ssl.conn)
+        {
+            w->ssl.conn = SSL_new(netdata_srv_ctx);
+            if ( w->ssl.conn ) {
+                SSL_set_accept_state(w->ssl.conn);
+            } else {
+                error("Failed to create SSL context on socket fd %d.", w->ifd);
+                if (test[0] < 0x18){
+                    WEB_CLIENT_IS_DEAD(w);
+                    sock_setnonblock(w->ifd);
+                    return w;
+                }
+            }
+        }
+
+        if (w->ssl.conn) {
+            if (SSL_set_fd(w->ssl.conn, w->ifd) != 1) {
+                error("Failed to set the socket to the SSL on socket fd %d.", w->ifd);
+                //The client is not set dead, because I received a normal HTTP request
+                //instead a Client Hello(HTTPS).
+                if ( test[0] < 0x18 ){
+                    WEB_CLIENT_IS_DEAD(w);
+                }
+            }
+            else{
+                w->ssl.flags = security_process_accept(w->ssl.conn, (int)test[0]);
+            }
+        }
+
+        sock_setnonblock(w->ifd);
+    } else{
+        w->ssl.flags = NETDATA_SSL_NO_HANDSHAKE;
+    }
+#endif
 
     debug(D_WEB_CLIENT, "%llu: ADDED CLIENT FD %d", w->id, pi->fd);
     return w;
@@ -189,6 +248,8 @@ static int web_server_rcv_callback(POLLINFO *pi, short int *events) {
     struct web_client *w = (struct web_client *)pi->data;
     int fd = pi->fd;
 
+    //BRING IT TO HERE
+
     if(unlikely(web_client_receive(w) < 0))
         return -1;
 
@@ -211,8 +272,9 @@ static int web_server_rcv_callback(POLLINFO *pi, short int *events) {
                         , POLLINFO_FLAG_CLIENT_SOCKET
                         , "FILENAME"
                         , ""
+                        , ""
                         , web_server_file_add_callback
-                        , web_werver_file_del_callback
+                        , web_server_file_del_callback
                         , web_server_file_read_callback
                         , web_server_file_write_callback
                         , (void *) w
@@ -398,6 +460,9 @@ void *socket_listen_main_static_threaded(void *ptr) {
             if(!api_sockets.opened)
                 fatal("LISTENER: no listen sockets available.");
 
+#ifdef ENABLE_HTTPS
+            security_start_ssl(NETDATA_SSL_CONTEXT_SERVER);
+#endif
             // 6 threads is the optimal value
             // since 6 are the parallel connections browsers will do
             // so, if the machine has more CPUs, avoid using resources unnecessarily
@@ -412,7 +477,7 @@ void *socket_listen_main_static_threaded(void *ptr) {
 
             if(static_threaded_workers_count < 1) static_threaded_workers_count = 1;
 
-            size_t max_sockets = (size_t)config_get_number(CONFIG_SECTION_WEB, "web server max sockets", (long long int)(rlimit_nofile.rlim_cur / 2));
+            size_t max_sockets = (size_t)config_get_number(CONFIG_SECTION_WEB, "web server max sockets", (long long int)(rlimit_nofile.rlim_cur / 4));
 
             static_workers_private_data = callocz((size_t)static_threaded_workers_count, sizeof(struct web_server_static_threaded_worker));
 

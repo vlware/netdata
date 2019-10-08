@@ -17,7 +17,10 @@ typedef enum web_client_acl {
     WEB_CLIENT_ACL_BADGE       = 1 << 2,
     WEB_CLIENT_ACL_MGMT        = 1 << 3,
     WEB_CLIENT_ACL_STREAMING   = 1 << 4,
-    WEB_CLIENT_ACL_NETDATACONF = 1 << 5
+    WEB_CLIENT_ACL_NETDATACONF = 1 << 5,
+    WEB_CLIENT_ACL_SSL_OPTIONAL = 1 << 6,
+    WEB_CLIENT_ACL_SSL_FORCE = 1 << 7,
+    WEB_CLIENT_ACL_SSL_DEFAULT = 1 << 8
 } WEB_CLIENT_ACL;
 
 #define web_client_can_access_dashboard(w) ((w)->acl & WEB_CLIENT_ACL_DASHBOARD)
@@ -26,6 +29,9 @@ typedef enum web_client_acl {
 #define web_client_can_access_mgmt(w) ((w)->acl & WEB_CLIENT_ACL_MGMT)
 #define web_client_can_access_stream(w) ((w)->acl & WEB_CLIENT_ACL_STREAMING)
 #define web_client_can_access_netdataconf(w) ((w)->acl & WEB_CLIENT_ACL_NETDATACONF)
+#define web_client_is_using_ssl_optional(w) ((w)->port_acl & WEB_CLIENT_ACL_SSL_OPTIONAL)
+#define web_client_is_using_ssl_force(w) ((w)->port_acl & WEB_CLIENT_ACL_SSL_FORCE)
+#define web_client_is_using_ssl_default(w) ((w)->port_acl & WEB_CLIENT_ACL_SSL_DEFAULT)
 
 typedef struct listen_sockets {
     struct config *config;              // the config file to use
@@ -51,8 +57,13 @@ extern void listen_sockets_close(LISTEN_SOCKETS *sockets);
 extern int connect_to_this(const char *definition, int default_port, struct timeval *timeout);
 extern int connect_to_one_of(const char *destination, int default_port, struct timeval *timeout, size_t *reconnects_counter, char *connected_to, size_t connected_to_size);
 
+#ifdef ENABLE_HTTPS
+extern ssize_t recv_timeout(struct netdata_ssl *ssl,int sockfd, void *buf, size_t len, int flags, int timeout);
+extern ssize_t send_timeout(struct netdata_ssl *ssl,int sockfd, void *buf, size_t len, int flags, int timeout);
+#else
 extern ssize_t recv_timeout(int sockfd, void *buf, size_t len, int flags, int timeout);
 extern ssize_t send_timeout(int sockfd, void *buf, size_t len, int flags, int timeout);
+#endif
 
 extern int sock_setnonblock(int fd);
 extern int sock_delnonblock(int fd);
@@ -61,7 +72,10 @@ extern int sock_setreuse_port(int fd, int reuse);
 extern int sock_enlarge_in(int fd);
 extern int sock_enlarge_out(int fd);
 
-extern int accept_socket(int fd, int flags, char *client_ip, size_t ipsize, char *client_port, size_t portsize, SIMPLE_PATTERN *access_list);
+extern int connection_allowed(int fd, char *client_ip, char *client_host, size_t hostsize,
+                              SIMPLE_PATTERN *access_list, const char *patname);
+extern int accept_socket(int fd, int flags, char *client_ip, size_t ipsize, char *client_port, size_t portsize,
+                         char *client_host, size_t hostsize, SIMPLE_PATTERN *access_list);
 
 #ifndef HAVE_ACCEPT4
 extern int accept4(int sock, struct sockaddr *addr, socklen_t *addrlen, int flags);
@@ -93,8 +107,9 @@ typedef struct pollinfo {
     int fd;                 // the file descriptor
     int socktype;           // the client socket type
     WEB_CLIENT_ACL port_acl; // the access lists permitted on this web server port (it's -1 for client sockets)
-    char *client_ip;        // the connected client IP
-    char *client_port;      // the connected client port
+    char *client_ip;         // Max INET6_ADDRSTRLEN bytes
+    char *client_port;       // Max NI_MAXSERV bytes
+    char *client_host;       // Max NI_MAXHOST bytes
 
     time_t connected_t;     // the time the socket connected
     time_t last_received_t; // the time the socket last received data
@@ -162,6 +177,7 @@ extern POLLINFO *poll_add_fd(POLLJOB *p
                              , uint32_t flags
                              , const char *client_ip
                              , const char *client_port
+                             , const char *client_host
                              , void *(*add_callback)(POLLINFO *pi, short int *events, void *data)
                              , void  (*del_callback)(POLLINFO *pi)
                              , int   (*rcv_callback)(POLLINFO *pi, short int *events)

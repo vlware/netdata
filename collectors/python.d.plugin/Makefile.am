@@ -54,6 +54,7 @@ include example/Makefile.inc
 include exim/Makefile.inc
 include fail2ban/Makefile.inc
 include freeradius/Makefile.inc
+include gearman/Makefile.inc
 include go_expvar/Makefile.inc
 include haproxy/Makefile.inc
 include hddtemp/Makefile.inc
@@ -87,6 +88,7 @@ include rabbitmq/Makefile.inc
 include redis/Makefile.inc
 include rethinkdbs/Makefile.inc
 include retroshare/Makefile.inc
+include riakkv/Makefile.inc
 include samba/Makefile.inc
 include sensors/Makefile.inc
 include smartd_log/Makefile.inc

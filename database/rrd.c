@@ -15,7 +15,11 @@ int rrd_delete_unupdated_dimensions = 0;
 
 int default_rrd_update_every = UPDATE_EVERY;
 int default_rrd_history_entries = RRD_DEFAULT_HISTORY_ENTRIES;
+#ifdef ENABLE_DBENGINE
+RRD_MEMORY_MODE default_rrd_memory_mode = RRD_MEMORY_MODE_DBENGINE;
+#else
 RRD_MEMORY_MODE default_rrd_memory_mode = RRD_MEMORY_MODE_SAVE;
+#endif
 int gap_when_lost_iterations_above = 1;
 
 
@@ -38,6 +42,9 @@ inline const char *rrd_memory_mode_name(RRD_MEMORY_MODE id) {
 
         case RRD_MEMORY_MODE_ALLOC:
             return RRD_MEMORY_MODE_ALLOC_NAME;
+
+        case RRD_MEMORY_MODE_DBENGINE:
+            return RRD_MEMORY_MODE_DBENGINE_NAME;
     }
 
     return RRD_MEMORY_MODE_SAVE_NAME;
@@ -55,6 +62,9 @@ RRD_MEMORY_MODE rrd_memory_mode_id(const char *name) {
 
     else if(unlikely(!strcmp(name, RRD_MEMORY_MODE_ALLOC_NAME)))
         return RRD_MEMORY_MODE_ALLOC;
+
+    else if(unlikely(!strcmp(name, RRD_MEMORY_MODE_DBENGINE_NAME)))
+        return RRD_MEMORY_MODE_DBENGINE;
 
     return RRD_MEMORY_MODE_SAVE;
 }
@@ -126,7 +136,6 @@ const char *rrdset_type_name(RRDSET_TYPE chart_type) {
     }
 }
 
-
 // ----------------------------------------------------------------------------
 // RRD - cache directory
 
@@ -148,3 +157,4 @@ char *rrdset_cache_dir(RRDHOST *host, const char *id, const char *config_section
 
     return ret;
 }
+

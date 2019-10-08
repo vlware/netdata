@@ -303,7 +303,7 @@ install_non_systemd_init() {
 				run rc-update add netdata default &&
 				return 0
 
-		elif [ "${key}" = "debian-7" ] || [ "${key}" = "ubuntu-12.04" ] || [ "${key}" = "ubuntu-14.04" ]; then
+		elif [ "${key}" =~ ^devuan* ] || [ "${key}" = "debian-7" ] || [ "${key}" = "ubuntu-12.04" ] || [ "${key}" = "ubuntu-14.04" ]; then
 			echo >&2 "Installing LSB init file..."
 			run cp system/netdata-lsb /etc/init.d/netdata &&
 				run chmod 755 /etc/init.d/netdata &&
@@ -332,6 +332,8 @@ install_non_systemd_init() {
 
 NETDATA_START_CMD="netdata"
 NETDATA_STOP_CMD="killall netdata"
+NETDATA_INSTALLER_START_CMD="${NETDATA_START_CMD}"
+NETDATA_INSTALLER_STOP_CMD="${NETDATA_STOP_CMD}"
 
 install_netdata_service() {
 	local uname="$(uname 2>/dev/null)"
@@ -351,15 +353,23 @@ install_netdata_service() {
 
 		elif [ "${uname}" = "FreeBSD" ]; then
 
-			run cp system/netdata-freebsd /etc/rc.d/netdata &&
-				NETDATA_START_CMD="service netdata start" &&
-				NETDATA_STOP_CMD="service netdata stop" &&
-				return 0
+			run cp system/netdata-freebsd /etc/rc.d/netdata && NETDATA_START_CMD="service netdata start" &&
+									   NETDATA_STOP_CMD="service netdata stop" &&
+									   NETDATA_INSTALLER_START_CMD="service netdata onestart" &&
+									   NETDATA_INSTALLER_STOP_CMD="${NETDATA_STOP_CMD}"
+			myret=$?
+
+			echo >&2 "Note: To explicitly enable netdata automatic start, set 'netdata_enable' to 'YES' in /etc/rc.conf"
+			echo >&2 ""
+
+			return ${myret}
 
 		elif issystemd; then
 			# systemd is running on this system
 			NETDATA_START_CMD="systemctl start netdata"
 			NETDATA_STOP_CMD="systemctl stop netdata"
+			NETDATA_INSTALLER_START_CMD="${NETDATA_START_CMD}"
+			NETDATA_INSTALLER_STOP_CMD="${NETDATA_STOP_CMD}"
 
 			SYSTEMD_DIRECTORY=""
 
@@ -370,10 +380,17 @@ install_netdata_service() {
 			fi
 
 			if [ "${SYSTEMD_DIRECTORY}x" != "x" ]; then
+				ENABLE_NETDATA_IF_PREVIOUSLY_ENABLED="run systemctl enable netdata"
+				IS_NETDATA_ENABLED="$(systemctl is-enabled netdata 2> /dev/null || echo "Netdata not there")"
+				if [ "${IS_NETDATA_ENABLED}" == "disabled" ]; then
+					echo >&2 "Netdata was there and disabled, make sure we don't re-enable it ourselves"
+					ENABLE_NETDATA_IF_PREVIOUSLY_ENABLED="true"
+				fi
+
 				echo >&2 "Installing systemd service..."
 				run cp system/netdata.service "${SYSTEMD_DIRECTORY}/netdata.service" &&
 					run systemctl daemon-reload &&
-					run systemctl enable netdata &&
+					${ENABLE_NETDATA_IF_PREVIOUSLY_ENABLED} &&
 					return 0
 			else
 				echo >&2 "no systemd directory; cannot install netdata.service"
@@ -390,6 +407,8 @@ install_netdata_service() {
 					NETDATA_START_CMD="rc-service netdata start"
 					NETDATA_STOP_CMD="rc-service netdata stop"
 				fi
+				NETDATA_INSTALLER_START_CMD="${NETDATA_START_CMD}"
+				NETDATA_INSTALLER_STOP_CMD="${NETDATA_STOP_CMD}"
 			fi
 
 			return ${ret}
@@ -429,6 +448,7 @@ stop_netdata_on_pid() {
 		ret=$?
 
 		test ${ret} -eq 0 && printf >&2 "." && sleep 2
+
 	done
 
 	echo >&2
@@ -445,8 +465,6 @@ netdata_pids() {
 	local p myns ns
 
 	myns="$(readlink /proc/self/ns/pid 2>/dev/null)"
-
-	# echo >&2 "Stopping a (possibly) running netdata (namespace '${myns}')..."
 
 	for p in \
 		$(cat /var/run/netdata.pid 2>/dev/null) \
@@ -477,12 +495,15 @@ restart_netdata() {
 
 	local started=0
 
-	progress "Start netdata"
+	progress "Restarting netdata instance"
 
 	if [ "${UID}" -eq 0 ]; then
-		service netdata stop
-		stop_all_netdata
-		service netdata restart && started=1
+		echo >&2
+		echo >&2 "Stopping all netdata threads"
+		run stop_all_netdata
+
+		echo >&2 "Starting netdata using command '${NETDATA_INSTALLER_START_CMD}'"
+		run ${NETDATA_INSTALLER_START_CMD} && started=1
 
 		if [ ${started} -eq 1 ] && [ -z "$(netdata_pids)" ]; then
 			echo >&2 "Ooops! it seems netdata is not started."
@@ -490,7 +511,8 @@ restart_netdata() {
 		fi
 
 		if [ ${started} -eq 0 ]; then
-			service netdata start && started=1
+			echo >&2 "Attempting another netdata start using command '${NETDATA_INSTALLER_START_CMD}'"
+			run ${NETDATA_INSTALLER_START_CMD} && started=1
 		fi
 	fi
 
@@ -500,8 +522,8 @@ restart_netdata() {
 	fi
 
 	if [ ${started} -eq 0 ]; then
-		# still not started...
-
+		# still not started... another forced attempt, just run the binary
+		echo >&2 "Netdata service still not started, attempting another forced restart by running '${netdata} ${@}'"
 		run stop_all_netdata
 		run "${netdata}" "${@}"
 		return $?
@@ -606,6 +628,11 @@ portable_add_user() {
 		run adduser -h "${homedir}" -s "${nologin}" -D -G "${username}" "${username}" && return 0
 	fi
 
+	# mac OS
+	if command -v sysadminctl 1> /dev/null 2>&1; then
+		run sysadminctl -addUser  ${username} && return 0
+	fi
+
 	echo >&2 "Failed to add ${username} user account !"
 
 	return 1
@@ -635,6 +662,11 @@ portable_add_group() {
 	# BusyBox
 	if command -v addgroup 1>/dev/null 2>&1; then
 		run addgroup "${groupname}" && return 0
+	fi
+
+	# mac OS
+	if command -v dseditgroup 1> /dev/null 2>&1; then
+		dseditgroup -o create "${groupname}" && return 0
 	fi
 
 	echo >&2 "Failed to add ${groupname} user group !"
@@ -674,6 +706,10 @@ portable_add_user_to_group() {
 			run addgroup "${username}" "${groupname}" && return 0
 		fi
 
+		# mac OS
+		if command -v dseditgroup 1> /dev/null 2>&1; then
+			dseditgroup -u "${username}" "${groupname}" && return 0
+		fi
 		echo >&2 "Failed to add user ${username} to group ${groupname} !"
 		return 1
 	fi

@@ -86,7 +86,7 @@ unsigned int read_iface_ifindex(const char *prefix, const char *iface) {
     return (unsigned int)ifindex;
 }
 
-struct iface *read_proc_net_dev(const char *scope, const char *prefix) {
+struct iface *read_proc_net_dev(const char *scope __maybe_unused, const char *prefix) {
     if(!prefix) prefix = "";
 
     procfile *ff = NULL;
@@ -230,7 +230,6 @@ static struct ns {
 };
 
 int switch_namespace(const char *prefix, pid_t pid) {
-    if(!prefix) prefix = "";
 
 #ifdef HAVE_SETNS
 

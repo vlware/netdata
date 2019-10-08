@@ -10,9 +10,10 @@
 # bash <(curl -Ss https://my-netdata.io/kickstart.sh) all
 #
 # Other options:
-#  --dont-wait       do not prompt for user input
-#  --non-interactive do not prompt for user input
-#  --no-updates      do not install script for daily updates
+#  --dont-wait                do not prompt for user input
+#  --non-interactive          do not prompt for user input
+#  --no-updates               do not install script for daily updates
+#  --local-files   set the full path of the desired tarball to run install with
 #
 # This script will:
 #
@@ -58,13 +59,27 @@ setup_terminal() {
 
 	return 0
 }
+setup_terminal || echo >/dev/null
 
-progress() {
-	echo >&2 " --- ${TPUT_DIM}${TPUT_BOLD}${*}${TPUT_RESET} --- "
+# -----------------------------------------------------------------------------
+fatal() {
+	printf >&2 "${TPUT_BGRED}${TPUT_WHITE}${TPUT_BOLD} ABORTED ${TPUT_RESET} ${*} \n\n"
+	exit 1
 }
 
+run_ok() {
+	printf >&2 "${TPUT_BGGREEN}${TPUT_WHITE}${TPUT_BOLD} OK ${TPUT_RESET} ${*} \n\n"
+}
+
+run_failed() {
+	printf >&2 "${TPUT_BGRED}${TPUT_WHITE}${TPUT_BOLD} FAILED ${TPUT_RESET} ${*} \n\n"
+}
+
+ESCAPED_PRINT_METHOD=
+printf "%q " test >/dev/null 2>&1
+[ $? -eq 0 ] && ESCAPED_PRINT_METHOD="printfq"
 escaped_print() {
-	if printf "%q " test >/dev/null 2>&1; then
+	if [ "${ESCAPED_PRINT_METHOD}" = "printfq" ]; then
 		printf "%q " "${@}"
 	else
 		printf "%s" "${*}"
@@ -72,24 +87,39 @@ escaped_print() {
 	return 0
 }
 
+progress() {
+	echo >&2 " --- ${TPUT_DIM}${TPUT_BOLD}${*}${TPUT_RESET} --- "
+}
+
+run_logfile="/dev/null"
 run() {
-	local dir="${PWD}" info_console
+	local user="${USER--}" dir="${PWD}" info info_console
 
 	if [ "${UID}" = "0" ]; then
+		info="[root ${dir}]# "
 		info_console="[${TPUT_DIM}${dir}${TPUT_RESET}]# "
 	else
+		info="[${user} ${dir}]$ "
 		info_console="[${TPUT_DIM}${dir}${TPUT_RESET}]$ "
 	fi
 
-	escaped_print "${info_console}${TPUT_BOLD}${TPUT_YELLOW}" "${@}" "${TPUT_RESET}\n" >&2
+	printf >>"${run_logfile}" "${info}"
+	escaped_print >>"${run_logfile}" "${@}"
+	printf >>"${run_logfile}" " ... "
 
-	${@}
+	printf >&2 "${info_console}${TPUT_BOLD}${TPUT_YELLOW}"
+	escaped_print >&2 "${@}"
+	printf >&2 "${TPUT_RESET}\n"
+
+	"${@}"
 
 	local ret=$?
 	if [ ${ret} -ne 0 ]; then
-		printf >&2 "${TPUT_BGRED}${TPUT_WHITE}${TPUT_BOLD} FAILED ${TPUT_RESET} ${*} \n\n"
+		run_failed
+		printf >>"${run_logfile}" "FAILED with exit code ${ret}\n"
 	else
-		printf >&2 "${TPUT_BGGREEN}${TPUT_WHITE}${TPUT_BOLD} OK ${TPUT_RESET} ${*} \n\n"
+		run_ok
+		printf >>"${run_logfile}" "OK\n"
 	fi
 
 	return ${ret}
@@ -112,7 +142,7 @@ warning() {
 
 create_tmp_directory() {
 	# Check if tmp is mounted as noexec
-	if grep -Eq '^[^ ]+ /tmp [^ ]+ ([^ ]*,)?noexec[, ]' /proc/mounts; then
+	if grep -Eq '^[^ ]+ /tmp [^ ]+ ([^ ]*,)?noexec[, ]' /proc/mounts > /dev/null 2>&1; then
 		pattern="$(pwd)/netdata-kickstart-XXXXXX"
 	else
 		pattern="/tmp/netdata-kickstart-XXXXXX"
@@ -134,7 +164,12 @@ download() {
 }
 
 set_tarball_urls() {
-	if [ "$1" == "stable" ]; then
+	if [ -n "${NETDATA_LOCAL_TARBALL_OVERRIDE}" ]; then
+		progress "Not fetching remote tarballs, local override was given"
+		return
+	fi
+
+	if [ "$1" = "stable" ]; then
 		local latest
 		# Simple version
 		# latest="$(curl -sSL https://api.github.com/repos/netdata/netdata/releases/latest | grep tag_name | cut -d'"' -f4)"
@@ -171,9 +206,9 @@ detect_bash4() {
 }
 
 dependencies() {
-	SYSTEM="$(uname -s)"
-	OS="$(uname -o)"
-	MACHINE="$(uname -m)"
+	SYSTEM="$(uname -s 2> /dev/null || uname -v)"
+	OS="$(uname -o 2> /dev/null || uname -rs)"
+	MACHINE="$(uname -m 2> /dev/null)"
 
 	echo "System            : ${SYSTEM}"
 	echo "Operating System  : ${OS}"
@@ -187,8 +222,17 @@ dependencies() {
 		if ! detect_bash4 "${bash}"; then
 			warning "Cannot detect packages to be installed in this system, without BASH v4+."
 		else
-			progress "Downloading script to detect required packages..."
-			download "${PACKAGES_SCRIPT}" "${TMPDIR}/install-required-packages.sh"
+			progress "Fetching script to detect required packages..."
+			if [ -n "${NETDATA_LOCAL_TARBALL_OVERRIDE_DEPS_SCRIPT}" ]; then
+				if [ -f "${NETDATA_LOCAL_TARBALL_OVERRIDE_DEPS_SCRIPT}" ]; then
+					run cp "${NETDATA_LOCAL_TARBALL_OVERRIDE_DEPS_SCRIPT}" "${TMPDIR}/install-required-packages.sh"
+				else
+					fatal "Invalid given dependency file, please check your --local-files parameter options and try again"
+				fi
+			else
+				download "${PACKAGES_SCRIPT}" "${TMPDIR}/install-required-packages.sh"
+			fi
+
 			if [ ! -s "${TMPDIR}/install-required-packages.sh" ]; then
 				warning "Downloaded dependency installation script is empty."
 			else
@@ -223,8 +267,6 @@ sudo=""
 [ -z "${UID}" ] && UID="$(id -u)"
 [ "${UID}" -ne "0" ] && sudo="sudo"
 export PATH="${PATH}:/usr/local/bin:/usr/local/sbin"
-
-setup_terminal || echo >/dev/null
 
 # ---------------------------------------------------------------------------------------------------------------------
 # try to update using autoupdater in the first place
@@ -266,6 +308,42 @@ while [ -n "${1}" ]; do
 	elif [ "${1}" = "--stable-channel" ]; then
 		RELEASE_CHANNEL="stable"
 		shift 1
+	elif [ "${1}" = "--local-files" ]; then
+		shift 1
+		if [ -z "${1}" ]; then
+			fatal "Missing netdata: Option --local-files requires extra information. The desired tarball for netdata, the checksum, the go.d plugin tarball , the go.d plugin config tarball and the dependency management script, in this particular order"
+		fi
+
+		export NETDATA_LOCAL_TARBALL_OVERRIDE="${1}"
+		shift 1
+
+		if [ -z "${1}" ]; then
+			fatal "Missing checksum file: Option --local-files requires extra information. The desired tarball for netdata, the checksum, the go.d plugin tarball , the go.d plugin config tarball and the dependency management script, in this particular order"
+		fi
+
+		export NETDATA_LOCAL_TARBALL_OVERRIDE_CHECKSUM="${1}"
+		shift 1
+
+		if [ -z "${1}" ]; then
+			fatal "Missing go.d tarball: Option --local-files requires extra information. The desired tarball for netdata, the checksum, the go.d plugin tarball , the go.d plugin config tarball and the dependency management script, in this particular order"
+		fi
+
+		export NETDATA_LOCAL_TARBALL_OVERRIDE_GO_PLUGIN="${1}"
+		shift 1
+
+		if [ -z "${1}" ]; then
+			fatal "Missing go.d config tarball: Option --local-files requires extra information. The desired tarball for netdata, the checksum, the go.d plugin tarball , the go.d plugin config tarball and the dependency management script, in this particular order"
+		fi
+
+		export NETDATA_LOCAL_TARBALL_OVERRIDE_GO_PLUGIN_CONFIG="${1}"
+		shift 1
+
+		if [ -z "${1}" ]; then
+			fatal "Missing dependencies management scriptlet: Option --local-files requires extra information. The desired tarball for netdata, the checksum, the go.d plugin tarball , the go.d plugin config tarball and the dependency management script, in this particular order"
+		fi
+
+		export NETDATA_LOCAL_TARBALL_OVERRIDE_DEPS_SCRIPT="${1}"
+		shift 1
 	else
 		break
 	fi
@@ -277,17 +355,24 @@ if [ "${INTERACTIVE}" = "0" ]; then
 fi
 
 TMPDIR=$(create_tmp_directory)
-cd ${TMPDIR} || :
+cd "${TMPDIR}"
 
 dependencies
 
 # ---------------------------------------------------------------------------------------------------------------------
 # download netdata package
 
-set_tarball_urls "${RELEASE_CHANNEL}"
+if [ -z "${NETDATA_LOCAL_TARBALL_OVERRIDE}" ]; then
+	set_tarball_urls "${RELEASE_CHANNEL}"
 
-download "${NETDATA_TARBALL_CHECKSUM_URL}" "${TMPDIR}/sha256sum.txt"
-download "${NETDATA_TARBALL_URL}" "${TMPDIR}/netdata-latest.tar.gz"
+	download "${NETDATA_TARBALL_CHECKSUM_URL}" "${TMPDIR}/sha256sum.txt"
+	download "${NETDATA_TARBALL_URL}" "${TMPDIR}/netdata-latest.tar.gz"
+else
+	progress "Installation sources were given as input, running installation using \"${NETDATA_LOCAL_TARBALL_OVERRIDE}\""
+	run cp "${NETDATA_LOCAL_TARBALL_OVERRIDE_CHECKSUM}" "${TMPDIR}/sha256sum.txt"
+	run cp "${NETDATA_LOCAL_TARBALL_OVERRIDE}" "${TMPDIR}/netdata-latest.tar.gz"
+fi
+
 if ! grep netdata-latest.tar.gz "${TMPDIR}/sha256sum.txt" | safe_sha256sum -c - >/dev/null 2>&1; then
 	fatal "Tarball checksum validation failed. Stopping netdata installation and leaving tarball in ${TMPDIR}"
 fi
@@ -301,7 +386,9 @@ cd netdata-* || fatal "Cannot cd to netdata source tree"
 if [ -x netdata-installer.sh ]; then
 	progress "Installing netdata..."
 	run ${sudo} ./netdata-installer.sh ${NETDATA_UPDATES} ${NETDATA_INSTALLER_OPTIONS} "${@}" || fatal "netdata-installer.sh exited with error"
-	rm -rf "${TMPDIR}" >/dev/null 2>&1
+	if [ -d "${TMPDIR}" ] && [ ! "${TMPDIR}" = "/" ]; then
+		run ${sudo} rm -rf "${TMPDIR}" >/dev/null 2>&1
+	fi
 else
 	fatal "Cannot install netdata from source (the source directory does not include netdata-installer.sh). Leaving all files in ${TMPDIR}"
 fi

@@ -71,6 +71,7 @@ var urlOptions = {
     alarm_unique_id: 0,
     alarm_id: 0,
     alarm_event_id: 0,
+    alarm_when: 0,
 
     hasProperty: function (property) {
         // console.log('checking property ' + property + ' of type ' + typeof(this[property]));
@@ -139,7 +140,7 @@ var urlOptions = {
             }
         }
 
-        var numeric = ['after', 'before', 'highlight_after', 'highlight_before'];
+        var numeric = ['after', 'before', 'highlight_after', 'highlight_before', 'alarm_when'];
         len = numeric.length;
         while (len--) {
             if (typeof urlOptions[numeric[len]] === 'string') {
@@ -151,6 +152,22 @@ var urlOptions = {
                     urlOptions[numeric[len]] = 0;
                 }
             }
+        }
+
+        if (urlOptions.alarm_when) {
+            // if alarm_when exists, create after/before params
+            // -/+ 2 minutes from the alarm, and reload the page
+            const alarmTime = new Date(urlOptions.alarm_when * 1000).valueOf();
+            const timeMarginMs = 120000; // 2 mins
+
+            const after = alarmTime - timeMarginMs;
+            const before = alarmTime + timeMarginMs;
+            const newHash = document.location.hash.replace(
+                /;alarm_when=[0-9]*/i,
+                ";after=" + after + ";before=" + before,
+            );
+            history.replaceState(null, '', newHash);
+            location.reload();
         }
 
         if (urlOptions.server !== null && urlOptions.server !== '') {
@@ -704,6 +721,14 @@ function restrictMyNetdataMenu() {
     </div>`);
 }
 
+function openAuthenticatedUrl(url) {
+    if (isSignedIn()) {
+        window.open(url);
+    } else {
+        window.open(`${NETDATA.registry.cloudBaseURL}/account/sign-in-agent?id=${NETDATA.registry.machine_guid}&name=${encodeURIComponent(NETDATA.registry.hostname)}&origin=${encodeURIComponent(window.location.origin + "/")}&redirect_uri=${encodeURIComponent(window.location.origin + "/" + url)}`);
+    }
+}
+
 function renderMyNetdataMenu(machinesArray) {
     const el = document.getElementById('my-netdata-dropdown-content');
     el.classList.add(`theme-${netdataTheme}`);
@@ -766,6 +791,11 @@ function renderMyNetdataMenu(machinesArray) {
     if (!isSignedIn()) {
         html += (
             `<div class="agent-item">
+                <i class="fas fa-tv"></i>
+                <a onClick="openAuthenticatedUrl('console.html');" target="_blank">Nodes<sup class="beta"> beta</sup></a>
+                <div></div>
+            </div>
+            <div class="agent-item">
                 <i class="fas fa-cog""></i>
                 <a href="#" onclick="switchRegistryModalHandler(); return false;">Switch Identity</a>
                 <div></div>
@@ -780,7 +810,7 @@ function renderMyNetdataMenu(machinesArray) {
         html += (
             `<div class="agent-item">
                 <i class="fas fa-tv"></i>
-                <a href="console/index.html" target="_blank">Nodes view</a>
+                <a onclick="openAuthenticatedUrl('console.html');" target="_blank">Nodes<sup class="beta"> beta</sup></a>
                 <div></div>
             </div>
             <div class="agent-item">
@@ -1762,8 +1792,6 @@ function renderPage(menus, data) {
                 if (urlOptions.mode === 'print') {
                     chtml += '</div>';
                 }
-
-                // console.log('         \------- ' + chart.id + ' (' + chart.priority + '): ' + chart.context  + ' height: ' + menus[menu].submenus[submenu].height);
             }
 
             head += '</div>';
@@ -1775,9 +1803,26 @@ function renderPage(menus, data) {
         html += mhead + shtml + '</div></div><hr role="separator"/>';
     }
 
+    const isMemoryModeDbEngine = data.memory_mode === "dbengine";
+
     sidebar += '<li class="" style="padding-top:15px;"><a href="https://github.com/netdata/netdata/blob/master/docs/Add-more-charts-to-netdata.md#add-more-charts-to-netdata" target="_blank"><i class="fas fa-plus"></i> add more charts</a></li>';
     sidebar += '<li class=""><a href="https://github.com/netdata/netdata/tree/master/health#Health-monitoring" target="_blank"><i class="fas fa-plus"></i> add more alarms</a></li>';
-    sidebar += '<li class="" style="margin:20px;color:#666;"><small>netdata on <b>' + data.hostname.toString() + '</b>, collects every ' + ((data.update_every === 1) ? 'second' : data.update_every.toString() + ' seconds') + ' <b>' + data.dimensions_count.toLocaleString() + '</b> metrics, presented as <b>' + data.charts_count.toLocaleString() + '</b> charts and monitored by <b>' + data.alarms_count.toLocaleString() + '</b> alarms, using ' + Math.round(data.rrd_memory_bytes / 1024 / 1024).toLocaleString() + ' MB of memory for ' + NETDATA.seconds4human(data.update_every * data.history, { space: '&nbsp;' }) + ' of real-time history.<br/>&nbsp;<br/><b>netdata</b><br/>' + data.version.toString() + '</small></li>';
+    sidebar += '<li class="" style="margin:20px;color:#666;"><small>Every ' +
+      ((data.update_every === 1) ? 'second' : data.update_every.toString() + ' seconds') + ', ' +
+      'Netdata collects <strong>' + data.dimensions_count.toLocaleString() + '</strong> metrics on ' +
+      data.hostname.toString() + ', presents them in <strong>' +
+      data.charts_count.toLocaleString() + '</strong> charts' +
+      (isMemoryModeDbEngine ? '' : ',') + // oxford comma
+      ' and monitors them with <strong>' +
+      data.alarms_count.toLocaleString() + '</strong> alarms.';
+
+    if (!isMemoryModeDbEngine) {
+        sidebar += '<br />&nbsp;<br />Get more history by ' +
+          '<a href="https://docs.netdata.cloud/docs/configuration-guide/#increase-the-metrics-retention-period" target=_blank>configuring Netdata\'s <strong>history</strong></a> or using the <a href="https://docs.netdata.cloud/database/engine/" target=_blank>DB engine.</a>'
+    }
+
+    sidebar += '<br/>&nbsp;<br/><strong>netdata</strong><br/>' + data.version.toString() + '</small></li>';
+
     sidebar += '</ul>';
     div.innerHTML = html;
     document.getElementById('sidebar').innerHTML = sidebar;
@@ -1980,7 +2025,7 @@ function clipboardCopyBadgeEmbed(url) {
 function alarmsUpdateModal() {
     var active = '<h3>Raised Alarms</h3><table class="table">';
     var all = '<h3>All Running Alarms</h3><div class="panel-group" id="alarms_all_accordion" role="tablist" aria-multiselectable="true">';
-    var footer = '<hr/><a href="https://github.com/netdata/netdata/tree/master/web/api/badges#netdata-badges" target="_blank">netdata badges</a> refresh automatically. Their color indicates the state of the alarm: <span style="color: #e05d44"><b>&nbsp;red&nbsp;</b></span> is critical, <span style="color:#fe7d37"><b>&nbsp;orange&nbsp;</b></span> is warning, <span style="color: #4c1"><b>&nbsp;bright green&nbsp;</b></span> is ok, <span style="color: #9f9f9f"><b>&nbsp;light grey&nbsp;</b></span> is undefined (i.e. no data or no status), <span style="color: #000"><b>&nbsp;black&nbsp;</b></span> is not initialized. You can copy and paste their URLs to embed them in any web page.<br/>netdata can send notifications for these alarms. Check <a href="https://github.com/netdata/netdata/blob/master/health/notifications/health_alarm_notify.conf">this configuration file</a> for more information.';
+    var footer = '<hr/><a href="https://github.com/netdata/netdata/tree/master/web/api/badges#netdata-badges" target="_blank">netdata badges</a> refresh automatically. Their color indicates the state of the alarm: <span style="color: #e05d44"><b>&nbsp;red&nbsp;</b></span> is critical, <span style="color:#fe7d37"><b>&nbsp;orange&nbsp;</b></span> is warning, <span style="color: #4c1"><b>&nbsp;bright green&nbsp;</b></span> is ok, <span style="color: #9f9f9f"><b>&nbsp;light grey&nbsp;</b></span> is undefined (i.e. no data or no status), <span style="color: #000"><b>&nbsp;black&nbsp;</b></span> is not initialized. You can copy and paste their URLs to embed them in any web page.<br/>netdata can send notifications for these alarms. Check <a href="https://github.com/netdata/netdata/blob/master/health/notifications/health_alarm_notify.conf" target="_blank">this configuration file</a> for more information.';
 
     loadClipboard(function () {
     });
@@ -2066,7 +2111,7 @@ function alarmsUpdateModal() {
             var badge_url = NETDATA.alarms.server + '/api/v1/badge.svg?chart=' + alarm.chart + '&alarm=' + alarm.name + '&refresh=auto';
 
             var action_buttons = '<br/>&nbsp;<br/>role: <b>' + alarm.recipient + '</b><br/>&nbsp;<br/>'
-                + '<div class="action-button ripple" title="click to scroll the dashboard to the chart of this alarm" data-toggle="tooltip" data-placement="bottom" onClick="scrollToChartAfterHidingModal(\'' + alarm.chart + '\'); $(\'#alarmsModal\').modal(\'hide\'); return false;"><i class="fab fa-periscope"></i></div>'
+                + '<div class="action-button ripple" title="click to scroll the dashboard to the chart of this alarm" data-toggle="tooltip" data-placement="bottom" onClick="scrollToChartAfterHidingModal(\'' + alarm.chart + '\', ' + alarm.last_status_change * 1000 + ', \'' + alarm.status + '\'); $(\'#alarmsModal\').modal(\'hide\'); return false;"><i class="fab fa-periscope"></i></div>'
                 + '<div class="action-button ripple" title="click to copy to the clipboard the URL of this badge" data-toggle="tooltip" data-placement="bottom" onClick="clipboardCopy(\'' + badge_url + '\'); return false;"><i class="far fa-copy"></i></div>'
                 + '<div class="action-button ripple" title="click to copy to the clipboard an auto-refreshing <code>embed</code> html element for this badge" data-toggle="tooltip" data-placement="bottom" onClick="clipboardCopyBadgeEmbed(\'' + badge_url + '\'); return false;"><i class="fas fa-copy"></i></div>';
 
@@ -2085,6 +2130,14 @@ function alarmsUpdateModal() {
                     + ((typeof alarm.calc !== 'undefined') ? ('<tr><td width="10%" style="text-align:right">calculation</td><td><span style="font-family: monospace;">' + alarm.calc + '</span></td></tr>') : '')
                     + ((chart.green !== null) ? ('<tr><td width="10%" style="text-align:right">green&nbsp;threshold</td><td><code>' + chart.green + ' ' + units + '</code></td></tr>') : '')
                     + ((chart.red !== null) ? ('<tr><td width="10%" style="text-align:right">red&nbsp;threshold</td><td><code>' + chart.red + ' ' + units + '</code></td></tr>') : '');
+            }
+
+            if (alarm.warn_repeat_every > 0) {
+                html += '<tr><td width="10%" style="text-align:right">repeat&nbsp;warning</td><td>' + NETDATA.seconds4human(alarm.warn_repeat_every) + '</td></tr>';
+            }
+
+            if (alarm.crit_repeat_every > 0) {
+                html += '<tr><td width="10%" style="text-align:right">repeat&nbsp;critical</td><td>' + NETDATA.seconds4human(alarm.crit_repeat_every) + '</td></tr>';
             }
 
             var delay = '';
@@ -2298,6 +2351,18 @@ function alarmsUpdateModal() {
                 exportDataType: 'basic',
                 exportOptions: {
                     fileName: 'netdata_alarm_log'
+                },
+                onClickRow: function (row, $element,field) {
+                    void (field);
+                    void ($element);
+                    let main_url;
+                    let common_url = "&host=" + encodeURIComponent(row['hostname']) + "&chart=" + encodeURIComponent(row['chart']) + "&family=" + encodeURIComponent(row['family']) + "&alarm=" + encodeURIComponent(row['name']) + "&alarm_unique_id=" + row['unique_id'] + "&alarm_id=" + row['alarm_id'] + "&alarm_event_id=" +  row['alarm_event_id'] + "&alarm_when=" + row['when'];
+                    if (NETDATA.registry.isUsingGlobalRegistry() && NETDATA.registry.machine_guid != null) {
+                        main_url = "https://netdata.cloud/alarms/redirect?agentID=" + NETDATA.registry.machine_guid + common_url;
+                    } else {
+                        main_url = NETDATA.registry.server + "/goto-host-from-alarm.html?" + common_url ;
+                    }
+                    window.open(main_url,"_blank");
                 },
                 rowStyle: function (row, index) {
                     void (index);
@@ -2726,7 +2791,7 @@ function initializeDynamicDashboardWithData(data) {
         }
 
         // update the dashboard hostname
-        document.getElementById('hostname').innerHTML = options.hostname + ((netdataSnapshotData !== null) ? ' (snap)' : '').toString() + '&nbsp;&nbsp;<strong class="caret">';
+        document.getElementById('hostname').innerHTML = '<span id="hostnametext">' + options.hostname + ((netdataSnapshotData !== null) ? ' (snap)' : '').toString() + '</span>&nbsp;&nbsp;<strong class="caret">';
         document.getElementById('hostname').href = NETDATA.serverDefault;
         document.getElementById('netdataVersion').innerHTML = options.version;
 
@@ -3929,9 +3994,21 @@ function scrollDashboardTo() {
 
 var modalHiddenCallback = null;
 
-function scrollToChartAfterHidingModal(chart) {
+function scrollToChartAfterHidingModal(chart, alarmDate, alarmStatus) {
     modalHiddenCallback = function () {
-        NETDATA.alarms.scrollToChart(chart);
+        NETDATA.alarms.scrollToChart(chart, alarmDate);
+
+        if (['WARNING', 'CRITICAL'].includes(alarmStatus)) {
+            const currentChartState = NETDATA.options.targets.find(
+              (chartState) => chartState.id === chart,
+            )
+            const twoMinutes = 2 * 60 * 1000
+            NETDATA.globalPanAndZoom.setMaster(
+              currentChartState,
+              alarmDate - twoMinutes,
+              alarmDate + twoMinutes,
+            )
+        }
     };
 }
 
@@ -4604,6 +4681,36 @@ function getCloudAccountAgents() {
     });
 }
 
+/** Updates the lastAccessTime and accessCount properties of the agent for the account. */
+function touchAgent() {
+    if (!isSignedIn()) {
+        return [];
+    }
+
+    const touchUrl = `${NETDATA.registry.cloudBaseURL}/api/v1/agents/${NETDATA.registry.machine_guid}/touch?account_id=${cloudAccountID}`;
+    return fetch(
+        touchUrl,
+        {
+            method: "post",
+            body: "",
+            mode: "cors",
+            headers: {
+                "Authorization": `Bearer ${cloudToken}`
+            }
+        }
+    ).then((response) => {
+        if (!response.ok) {
+            throw Error("Cannot touch agent" + JSON.stringify(response));
+        }
+        return response.json();
+    }).then((payload) => {
+
+    }).catch(function (error) {
+        console.log(error);
+        return null;
+    });
+}
+
 // https://github.com/netdata/hub/issues/128
 function postCloudAccountAgents(agentsToSync) {
     if (!isSignedIn()) {
@@ -4797,13 +4904,12 @@ function renderAccountUI() {
         container.removeAttribute("title");
         container.removeAttribute("data-original-title");
         container.removeAttribute("data-placement");
-        // <a href="/console/index.html#/charts/${NETDATA.registry.machine_guid}" target="_blank" class="btn">
         container.innerHTML = (
             `<a href="#" class="dropdown-toggle" data-toggle="dropdown"><span id="amc-account-name"></span> <strong class="caret"></strong></a>
             <ul id="cloud-menu" class="dropdown-menu scrollable-menu inpagemenu" role="menu">   
                 <li>
-                    <a href="console/index.html#/" target="_blank" class="btn">
-                    <i class="fas fa-tv"></i>&nbsp;&nbsp;<span class="hidden-sm hidden-md">Nodes view</span>
+                    <a onclick="openAuthenticatedUrl('console.html');" target="_blank" class="btn">
+                    <i class="fas fa-tv"></i>&nbsp;&nbsp;<span class="hidden-sm hidden-md">Nodes<sup class="beta"> beta</sup></span>
                     </a>
                 </li>
                 <li>
@@ -4849,6 +4955,9 @@ function handleSignInMessage(e) {
     cloudToken = e.data.token;
 
     netdataRegistryCallback(registryAgents);
+    if (e.data.redirectURI && !window.location.href.includes(e.data.redirectURI)) {
+        window.location.replace(e.data.redirectURI);
+    }
 }
 
 function handleSignOutMessage(e) {
@@ -5006,6 +5115,7 @@ function initCloud() {
         cloudSSOInit();
     }
 
+    touchAgent();
     renderAccountUI();
 }
 

@@ -20,13 +20,9 @@ CLEANFILES= \
 
 EXTRA_DIST = \
 	.gitignore \
-	.codacy.yml \
-	.codeclimate.yml \
 	.csslintrc \
 	.eslintignore \
 	.eslintrc \
-	.lgtm.yml \
-	.travis \
 	.github/CODEOWNERS \
 	build/m4/jemalloc.m4 \
 	build/m4/ax_c___atomic.m4 \
@@ -55,6 +51,7 @@ SUBDIRS = \
 	$(NULL)
 
 dist_noinst_DATA= \
+	CHANGELOG.md \
 	cppcheck.sh \
 	configs.signatures \
 	contrib \
@@ -63,6 +60,7 @@ dist_noinst_DATA= \
 	package.json \
 	docs \
 	packaging/version \
+	packaging/go.d.version \
 	packaging/go.d.checksums \
 	packaging/installer/README.md \
 	packaging/installer/UNINSTALL.md \
@@ -74,7 +72,6 @@ dist_noinst_DATA= \
 # should be proper init.d/openrc/systemd usable
 dist_noinst_SCRIPTS= \
 	coverity-scan.sh \
-	coverity-install.sh \
 	packaging/installer/netdata-updater.sh \
 	packaging/installer/netdata-uninstaller.sh \
 	packaging/installer/kickstart.sh \
@@ -106,7 +103,7 @@ SUBDIRS += \
 
 AM_CFLAGS = \
 	$(OPTIONAL_MATH_CFLAGS) \
-	$(OPTIONAL_NFACCT_CLFAGS) \
+	$(OPTIONAL_NFACCT_CFLAGS) \
 	$(OPTIONAL_ZLIB_CFLAGS) \
 	$(OPTIONAL_UUID_CFLAGS) \
 	$(OPTIONAL_LIBCAP_LIBS) \
@@ -154,6 +151,8 @@ LIBNETDATA_FILES = \
     libnetdata/simple_pattern/simple_pattern.h \
     libnetdata/socket/socket.c \
     libnetdata/socket/socket.h \
+    libnetdata/socket/security.c \
+    libnetdata/socket/security.h \
     libnetdata/statistical/statistical.c \
     libnetdata/statistical/statistical.h \
     libnetdata/storage_number/storage_number.c \
@@ -162,6 +161,13 @@ LIBNETDATA_FILES = \
     libnetdata/threads/threads.h \
 	libnetdata/url/url.c \
 	libnetdata/url/url.h \
+	libnetdata/json/json.c \
+	libnetdata/json/json.h \
+	libnetdata/json/jsmn.c \
+	libnetdata/json/jsmn.h \
+	libnetdata/health/health.c \
+	libnetdata/health/health.h \
+    libnetdata/string/utf8.h \
     $(NULL)
 
 APPS_PLUGIN_FILES = \
@@ -230,8 +236,18 @@ NFACCT_PLUGIN_FILES = \
     $(LIBNETDATA_FILES) \
     $(NULL)
 
+SLABINFO_PLUGIN_FILES = \
+	collectors/slabinfo.plugin/slabinfo.c \
+	$(LIBNETDATA_FILES)
+	$(NULL)
+
 XENSTAT_PLUGIN_FILES = \
     collectors/xenstat.plugin/xenstat_plugin.c \
+    $(LIBNETDATA_FILES) \
+    $(NULL)
+
+PERF_PLUGIN_FILES = \
+    collectors/perf.plugin/perf_plugin.c \
     $(LIBNETDATA_FILES) \
     $(NULL)
 
@@ -268,6 +284,7 @@ PROC_PLUGIN_FILES = \
 	collectors/proc.plugin/proc_vmstat.c \
 	collectors/proc.plugin/proc_uptime.c \
 	collectors/proc.plugin/sys_kernel_mm_ksm.c \
+	collectors/proc.plugin/sys_block_zram.c \
 	collectors/proc.plugin/sys_devices_system_edac_mc.c \
 	collectors/proc.plugin/sys_devices_system_node.c \
 	collectors/proc.plugin/sys_fs_btrfs.c \
@@ -310,6 +327,26 @@ RRD_PLUGIN_FILES = \
     database/rrdvar.c \
     database/rrdvar.h \
     $(NULL)
+
+if ENABLE_DBENGINE
+    RRD_PLUGIN_FILES += \
+        database/engine/rrdengine.c \
+        database/engine/rrdengine.h \
+        database/engine/rrddiskprotocol.h \
+        database/engine/datafile.c \
+        database/engine/datafile.h \
+        database/engine/journalfile.c \
+        database/engine/journalfile.h \
+        database/engine/rrdenginelib.c \
+        database/engine/rrdenginelib.h \
+        database/engine/rrdengineapi.c \
+        database/engine/rrdengineapi.h \
+        database/engine/pagecache.c \
+        database/engine/pagecache.h \
+        database/engine/rrdenglocking.c \
+        database/engine/rrdenglocking.h \
+        $(NULL)
+endif
 
 API_PLUGIN_FILES = \
     web/api/badges/web_buffer_svg.c \
@@ -412,6 +449,24 @@ BACKENDS_PLUGIN_FILES = \
     backends/prometheus/backend_prometheus.h \
     $(NULL)
 
+KINESIS_BACKEND_FILES = \
+    backends/aws_kinesis/aws_kinesis.c \
+    backends/aws_kinesis/aws_kinesis.h \
+    backends/aws_kinesis/aws_kinesis_put_record.cc \
+    backends/aws_kinesis/aws_kinesis_put_record.h \
+    $(NULL)
+
+PROMETHEUS_REMOTE_WRITE_BACKEND_FILES = \
+    backends/prometheus/remote_write/remote_write.cc \
+    backends/prometheus/remote_write/remote_write.h \
+    backends/prometheus/remote_write/remote_write.proto \
+    $(NULL)
+
+MONGODB_BACKEND_FILES = \
+    backends/mongodb/mongodb.c \
+    backends/mongodb/mongodb.h \
+    $(NULL)
+
 DAEMON_FILES = \
 	daemon/common.c \
 	daemon/common.h \
@@ -469,15 +524,25 @@ endif
 NETDATA_COMMON_LIBS = \
 	$(OPTIONAL_MATH_LIBS) \
 	$(OPTIONAL_ZLIB_LIBS) \
+	$(OPTIONAL_SSL_LIBS) \
 	$(OPTIONAL_UUID_LIBS) \
+	$(OPTIONAL_UV_LIBS) \
+	$(OPTIONAL_LZ4_LIBS) \
+	$(OPTIONAL_JUDY_LIBS) \
+	$(OPTIONAL_SSL_LIBS) \
+	$(OPTIONAL_JSONC_LIBS) \
 	$(NULL)
-
 
 sbin_PROGRAMS += netdata
 netdata_SOURCES = $(NETDATA_FILES)
 netdata_LDADD = \
 	$(NETDATA_COMMON_LIBS) \
 	$(NULL)
+if ENABLE_CXX_LINKER
+    netdata_LINK = $(CXXLD) $(CXXFLAGS) $(LDFLAGS) -o $@
+else
+    netdata_LINK = $(CCLD) $(CFLAGS) $(LDFLAGS) -o $@
+endif
 
 if ENABLE_PLUGIN_APPS
     plugins_PROGRAMS += apps.plugin
@@ -530,4 +595,45 @@ if ENABLE_PLUGIN_XENSTAT
         $(NETDATA_COMMON_LIBS) \
         $(OPTIONAL_XENSTAT_LIBS) \
         $(NULL)
+endif
+
+if ENABLE_PLUGIN_PERF
+    plugins_PROGRAMS += perf.plugin
+    perf_plugin_SOURCES = $(PERF_PLUGIN_FILES)
+    perf_plugin_LDADD = \
+        $(NETDATA_COMMON_LIBS) \
+        $(NULL)
+endif
+
+if ENABLE_PLUGIN_SLABINFO
+    plugins_PROGRAMS += slabinfo.plugin
+    slabinfo_plugin_SOURCES = $(SLABINFO_PLUGIN_FILES)
+    slabinfo_plugin_LDADD = \
+        $(NETDATA_COMMON_LIBS) \
+        $(NULL)
+endif
+
+if ENABLE_BACKEND_KINESIS
+    netdata_SOURCES += $(KINESIS_BACKEND_FILES)
+    netdata_LDADD += $(OPTIONAL_KINESIS_LIBS)
+endif
+
+if ENABLE_BACKEND_PROMETHEUS_REMOTE_WRITE
+    netdata_SOURCES += $(PROMETHEUS_REMOTE_WRITE_BACKEND_FILES)
+    netdata_LDADD += $(OPTIONAL_PROMETHEUS_REMOTE_WRITE_LIBS)
+    BUILT_SOURCES = \
+        backends/prometheus/remote_write/remote_write.pb.cc \
+        backends/prometheus/remote_write/remote_write.pb.h \
+        $(NULL)
+    nodist_netdata_SOURCES = $(BUILT_SOURCES)
+
+backends/prometheus/remote_write/remote_write.pb.cc \
+backends/prometheus/remote_write/remote_write.pb.h: backends/prometheus/remote_write/remote_write.proto
+	$(PROTOC) --proto_path=$(srcdir) --cpp_out=$(builddir) $^
+
+endif
+
+if ENABLE_BACKEND_MONGODB
+    netdata_SOURCES += $(MONGODB_BACKEND_FILES)
+    netdata_LDADD += $(OPTIONAL_MONGOC_LIBS)
 endif

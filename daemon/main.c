@@ -2,6 +2,7 @@
 
 #include "common.h"
 
+int netdata_zero_metrics_enabled;
 int netdata_anonymous_statistics_enabled;
 
 struct config netdata_config = {
@@ -24,7 +25,7 @@ void netdata_cleanup_and_exit(int ret) {
     error_log_limit_unlimited();
     info("EXIT: netdata prepares to exit with code %d...", ret);
 
-	send_statistics("EXIT", ret?"ERROR":"OK","-");
+    send_statistics("EXIT", ret?"ERROR":"OK","-");
 
     // cleanup/save the database and exit
     info("EXIT: cleaning up the database...");
@@ -48,6 +49,10 @@ void netdata_cleanup_and_exit(int ret) {
         if(unlink(pidfile) != 0)
             error("EXIT: cannot unlink pidfile '%s'.", pidfile);
     }
+
+#ifdef ENABLE_HTTPS
+    security_clean_openssl();
+#endif
 
     info("EXIT: all done - netdata is now exiting - bye bye...");
     exit(ret);
@@ -301,6 +306,13 @@ int help(int exitcode) {
             "  -W stacksize=N           Set the stacksize (in bytes).\n\n"
             "  -W debug_flags=N         Set runtime tracing to debug.log.\n\n"
             "  -W unittest              Run internal unittests and exit.\n\n"
+#ifdef ENABLE_DBENGINE
+            "  -W createdataset=N       Create a DB engine dataset of N seconds and exit.\n\n"
+            "  -W stresstest=A,B,C,D,E  Run a DB engine stress test for A seconds,\n"
+            "                           with B writers and C readers, with a ramp up\n"
+            "                           time of D seconds for writers, a page cache\n"
+            "                           size of E MiB, and exit.\n\n"
+#endif
             "  -W set section option value\n"
             "                           set netdata.conf option from the command line.\n\n"
             "  -W simple-pattern pattern string\n"
@@ -344,7 +356,20 @@ static const char *verify_required_directory(const char *dir) {
     return dir;
 }
 
-void log_init(void) {
+#ifdef ENABLE_HTTPS
+static void security_init(){
+    char filename[FILENAME_MAX + 1];
+    snprintfz(filename, FILENAME_MAX, "%s/ssl/key.pem",netdata_configured_user_config_dir);
+    security_key    = config_get(CONFIG_SECTION_WEB, "ssl key",  filename);
+
+    snprintfz(filename, FILENAME_MAX, "%s/ssl/cert.pem",netdata_configured_user_config_dir);
+    security_cert    = config_get(CONFIG_SECTION_WEB, "ssl certificate",  filename);
+
+    security_openssl_library();
+}
+#endif
+
+static void log_init(void) {
     char filename[FILENAME_MAX + 1];
     snprintfz(filename, FILENAME_MAX, "%s/debug.log", netdata_configured_log_dir);
     stdout_filename    = config_get(CONFIG_SECTION_GLOBAL, "debug log",  filename);
@@ -355,9 +380,9 @@ void log_init(void) {
     snprintfz(filename, FILENAME_MAX, "%s/access.log", netdata_configured_log_dir);
     stdaccess_filename = config_get(CONFIG_SECTION_GLOBAL, "access log", filename);
 
-	char deffacility[8];
-	snprintfz(deffacility,7,"%s","daemon");
-	facility_log = config_get(CONFIG_SECTION_GLOBAL, "facility log",  deffacility);
+    char deffacility[8];
+    snprintfz(deffacility,7,"%s","daemon");
+    facility_log = config_get(CONFIG_SECTION_GLOBAL, "facility log",  deffacility);
 
     error_log_throttle_period = config_get_number(CONFIG_SECTION_GLOBAL, "errors flood protection period", error_log_throttle_period);
     error_log_errors_per_period = (unsigned long)config_get_number(CONFIG_SECTION_GLOBAL, "errors to trigger flood protection", (long long int)error_log_errors_per_period);
@@ -419,8 +444,9 @@ static void get_netdata_configured_variables() {
     // get the hostname
 
     char buf[HOSTNAME_MAX + 1];
-    if(gethostname(buf, HOSTNAME_MAX) == -1)
+    if(gethostname(buf, HOSTNAME_MAX) == -1){
         error("Cannot get machine hostname.");
+    }
 
     netdata_configured_hostname = config_get(CONFIG_SECTION_GLOBAL, "hostname", buf);
     debug(D_OPTIONS, "hostname set to '%s'", netdata_configured_hostname);
@@ -471,6 +497,25 @@ static void get_netdata_configured_variables() {
 
     default_rrd_memory_mode = rrd_memory_mode_id(config_get(CONFIG_SECTION_GLOBAL, "memory mode", rrd_memory_mode_name(default_rrd_memory_mode)));
 
+#ifdef ENABLE_DBENGINE
+    // ------------------------------------------------------------------------
+    // get default Database Engine page cache size in MiB
+
+    default_rrdeng_page_cache_mb = (int) config_get_number(CONFIG_SECTION_GLOBAL, "page cache size", default_rrdeng_page_cache_mb);
+    if(default_rrdeng_page_cache_mb < RRDENG_MIN_PAGE_CACHE_SIZE_MB) {
+        error("Invalid page cache size %d given. Defaulting to %d.", default_rrdeng_page_cache_mb, RRDENG_MIN_PAGE_CACHE_SIZE_MB);
+        default_rrdeng_page_cache_mb = RRDENG_MIN_PAGE_CACHE_SIZE_MB;
+    }
+
+    // ------------------------------------------------------------------------
+    // get default Database Engine disk space quota in MiB
+
+    default_rrdeng_disk_quota_mb = (int) config_get_number(CONFIG_SECTION_GLOBAL, "dbengine disk space", default_rrdeng_disk_quota_mb);
+    if(default_rrdeng_disk_quota_mb < RRDENG_MIN_DISK_SPACE_MB) {
+        error("Invalid dbengine disk space %d given. Defaulting to %d.", default_rrdeng_disk_quota_mb, RRDENG_MIN_DISK_SPACE_MB);
+        default_rrdeng_disk_quota_mb = RRDENG_MIN_DISK_SPACE_MB;
+    }
+#endif
     // ------------------------------------------------------------------------
 
     netdata_configured_host_prefix = config_get(CONFIG_SECTION_GLOBAL, "host access prefix", "");
@@ -650,7 +695,7 @@ static int load_netdata_conf(char *filename, char overwrite_used) {
     return ret;
 }
 
-int get_system_info () {
+int get_system_info(struct rrdhost_system_info *system_info) {
     char *script;
     script = mallocz(sizeof(char) * (strlen(netdata_configured_primary_plugins_dir) + strlen("system-info.sh") + 2));
     sprintf(script, "%s/%s", netdata_configured_primary_plugins_dir, "system-info.sh");
@@ -674,12 +719,20 @@ int get_system_info () {
             if (*value=='=') {
                 *value='\0';
                 value++;
-                char *newline = value + strlen(value) - 1;
-                (*newline)='\0';
-            }
-            if (name && value && *name && *value) {
-                info("%s=%s", name, value);
-                setenv(name, value, 1);
+                if (strlen(value)>1) {
+                    char *newline = value + strlen(value) - 1;
+                    (*newline) = '\0';
+                }
+                char n[51], v[101];
+                snprintfz(n, 50,"%s",name);
+                snprintfz(v, 100,"%s",value);
+                if(unlikely(rrdhost_set_system_info_variable(system_info, n, v))) {
+                    info("Unexpected environment variable %s=%s", n, v);
+                }
+                else {
+                    info("%s=%s", n, v);
+                    setenv(n, v, 1);
+                }
             }
         }
         mypclose(fp, command_pid);
@@ -696,20 +749,20 @@ void send_statistics( const char *action, const char *action_result, const char 
         if (likely(access(optout_file, R_OK) != 0)) {
             as_script = mallocz(sizeof(char) * (strlen(netdata_configured_primary_plugins_dir) + strlen("anonymous-statistics.sh") + 2));
             sprintf(as_script, "%s/%s", netdata_configured_primary_plugins_dir, "anonymous-statistics.sh");
-			if (unlikely(access(as_script, R_OK) != 0)) {
-				netdata_anonymous_statistics_enabled=0;
-				info("Anonymous statistics script %s not found.",as_script);
-				freez(as_script);
-			} else {
-				netdata_anonymous_statistics_enabled=1;
-			}
-		} else {
+            if (unlikely(access(as_script, R_OK) != 0)) {
+               netdata_anonymous_statistics_enabled=0;
+               info("Anonymous statistics script %s not found.",as_script);
+               freez(as_script);
+            } else {
+               netdata_anonymous_statistics_enabled=1;
+            }
+        } else {
             netdata_anonymous_statistics_enabled = 0;
             as_script = NULL;
         }
         freez(optout_file);
     }
-	if(!netdata_anonymous_statistics_enabled) return;
+    if(!netdata_anonymous_statistics_enabled) return;
     if (!action) return;
     if (!action_result) action_result="";
     if (!action_data) action_data="";
@@ -726,6 +779,12 @@ void send_statistics( const char *action, const char *action_result, const char 
         mypclose(fp, command_pid);
     }
     freez(command_to_run);
+}
+
+void set_silencers_filename() {
+    char filename[FILENAME_MAX + 1];
+    snprintfz(filename, FILENAME_MAX, "%s/health.silencers.json", netdata_configured_varlib_dir);
+    silencers_filename = config_get(CONFIG_SECTION_HEALTH, "silencers file", filename);
 }
 
 int main(int argc, char **argv) {
@@ -833,6 +892,8 @@ int main(int argc, char **argv) {
                     {
                         char* stacksize_string = "stacksize=";
                         char* debug_flags_string = "debug_flags=";
+                        char* createdataset_string = "createdataset=";
+                        char* stresstest_string = "stresstest=";
 
                         if(strcmp(optarg, "unittest") == 0) {
                             if(unit_test_buffer()) return 1;
@@ -841,13 +902,43 @@ int main(int argc, char **argv) {
                             default_rrd_update_every = 1;
                             default_rrd_memory_mode = RRD_MEMORY_MODE_RAM;
                             default_health_enabled = 0;
-                            rrd_init("unittest");
+                            rrd_init("unittest", NULL);
                             default_rrdpush_enabled = 0;
                             if(run_all_mockup_tests()) return 1;
                             if(unit_test_storage()) return 1;
+#ifdef ENABLE_DBENGINE
+                            if(test_dbengine()) return 1;
+#endif
                             fprintf(stderr, "\n\nALL TESTS PASSED\n\n");
                             return 0;
                         }
+#ifdef ENABLE_DBENGINE
+                        else if(strncmp(optarg, createdataset_string, strlen(createdataset_string)) == 0) {
+                            optarg += strlen(createdataset_string);
+                            unsigned history_seconds = strtoul(optarg, NULL, 0);
+                            generate_dbengine_dataset(history_seconds);
+                            return 0;
+                        }
+                        else if(strncmp(optarg, stresstest_string, strlen(stresstest_string)) == 0) {
+                            char *endptr;
+                            unsigned test_duration_sec = 0, dset_charts = 0, query_threads = 0, ramp_up_seconds = 0,
+                            page_cache_mb = 0;
+
+                            optarg += strlen(stresstest_string);
+                            test_duration_sec = (unsigned)strtoul(optarg, &endptr, 0);
+                            if (',' == *endptr)
+                                dset_charts = (unsigned)strtoul(endptr + 1, &endptr, 0);
+                            if (',' == *endptr)
+                                query_threads = (unsigned)strtoul(endptr + 1, &endptr, 0);
+                            if (',' == *endptr)
+                                ramp_up_seconds = (unsigned)strtoul(endptr + 1, &endptr, 0);
+                            if (',' == *endptr)
+                                page_cache_mb = (unsigned)strtoul(endptr + 1, &endptr, 0);
+                            dbengine_stress_test(test_duration_sec, dset_charts, query_threads, ramp_up_seconds,
+                                                 page_cache_mb);
+                            return 0;
+                        }
+#endif
                         else if(strcmp(optarg, "simple-pattern") == 0) {
                             if(optind + 2 > argc) {
                                 fprintf(stderr, "%s", "\nUSAGE: -W simple-pattern 'pattern' 'string'\n\n"
@@ -1038,6 +1129,17 @@ int main(int argc, char **argv) {
         error_log_limit_unlimited();
 
         // --------------------------------------------------------------------
+        // get the certificate and start security
+#ifdef ENABLE_HTTPS
+        security_init();
+#endif
+
+        // --------------------------------------------------------------------
+        // This is the safest place to start the SILENCERS structure
+        set_silencers_filename();
+        health_initialize_global_silencers();
+
+        // --------------------------------------------------------------------
         // setup process signals
 
         // block signals while initializing threads.
@@ -1090,8 +1192,6 @@ int main(int argc, char **argv) {
 
     // initialize the log files
     open_all_log_files();
-	netdata_anonymous_statistics_enabled=-1;
-    if (get_system_info() == 0) send_statistics("START","-", "-");
 
 #ifdef NETDATA_INTERNAL_CHECKS
     if(debug_flags != 0) {
@@ -1126,18 +1226,22 @@ int main(int argc, char **argv) {
     // ------------------------------------------------------------------------
     // initialize rrd, registry, health, rrdpush, etc.
 
-    rrd_init(netdata_configured_hostname);
+    netdata_anonymous_statistics_enabled=-1;
+    struct rrdhost_system_info *system_info = calloc(1, sizeof(struct rrdhost_system_info));
+    get_system_info(system_info);
 
+    rrd_init(netdata_configured_hostname, system_info);
     // ------------------------------------------------------------------------
     // enable log flood protection
 
     error_log_limit_reset();
 
-
     // ------------------------------------------------------------------------
     // spawn the threads
 
     web_server_config_options();
+
+    netdata_zero_metrics_enabled = config_get_boolean_ondemand(CONFIG_SECTION_GLOBAL, "enable zero metrics", CONFIG_BOOLEAN_NO);
 
     for (i = 0; static_threads[i].name != NULL ; i++) {
         struct netdata_static_thread *st = &static_threads[i];
@@ -1152,6 +1256,8 @@ int main(int argc, char **argv) {
 
     info("netdata initialization completed. Enjoy real-time performance monitoring!");
     netdata_ready = 1;
+
+    send_statistics("START", "-",  "-");
 
     // ------------------------------------------------------------------------
     // unblock signals
